@@ -1,2 +1,6 @@
-# Auto detect text files and perform LF normalization
+# Auto-detect text files and perform LF normalization
 * text=auto
+
+# Ensure C source and header files preserve LF line endings
+*.c text eol=lf
+*.h text eol=lf
