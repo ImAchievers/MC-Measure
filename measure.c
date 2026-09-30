@@ -195,6 +195,15 @@ static void spush(int x, int z)
     stx[sn] = x; stz[sn] = z; sn++;
 }
 
+static int *wtx, *wtz;
+static size_t wcap, wn;
+
+static void wpush(int x, int z)
+{
+    if (wn == wcap) { wcap = wcap ? wcap * 2 : (1 << 16); wtx = realloc(wtx, wcap * sizeof(int)); wtz = realloc(wtz, wcap * sizeof(int)); }
+    wtx[wn] = x; wtz[wn] = z; wn++;
+}
+
 static int *pend;
 static size_t pendn, pendcap;
 
@@ -206,17 +215,6 @@ static void pend_add(int idx)
 
 static void flush_pending(void)
 {
-    for (size_t i = 0, base = pendn; i < base; i++)
-    {
-        int tx = tiles[pend[i]].tx, tz = tiles[pend[i]].tz;
-        for (int dz = -1; dz <= 1; dz++)
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            int j = tile_lookup(tx + dx, tz + dz);
-            if (j < 0) j = tile_new(tx + dx, tz + dz);
-            if (!tiles[j].biome && !tiles[j].q) { tiles[j].q = 1; pend_add(j); }
-        }
-    }
     gen_batch(pend, pendn);
     for (size_t i = 0; i < pendn; i++) tiles[pend[i]].q = 0;
     pendn = 0;
@@ -231,62 +229,6 @@ static int tile_slot(int tx, int tz)
     if (idx < 0) idx = tile_new(tx, tz);
     cache_tx = tx; cache_tz = tz; cache_idx = idx;
     return idx;
-}
-
-static int edge_hit(const int16_t *b, int dir, int target)
-{
-    if (dir == 0) { for (int x = 0; x < TILE; x++) if (b[x] == target) return 1; }
-    else if (dir == 1) { for (int x = 0; x < TILE; x++) if (b[(TILE - 1) * TILE + x] == target) return 1; }
-    else if (dir == 2) { for (int z = 0; z < TILE; z++) if (b[z * TILE] == target) return 1; }
-    else { for (int z = 0; z < TILE; z++) if (b[z * TILE + TILE - 1] == target) return 1; }
-    return 0;
-}
-
-static void prefetch(int s0, int target)
-{
-    int dnx[4] = {0, 0, -1, 1}, dnz[4] = {-1, 1, 0, 0};
-    int *fr = malloc(sizeof(int));
-    fr[0] = s0;
-    size_t frn = 1;
-    tiles[s0].q = 1;
-    int *gen = NULL, *nf = NULL;
-    size_t gc = 0, nfc = 0;
-    while (frn)
-    {
-        size_t gn = 0, nfn = 0;
-        for (size_t i = 0; i < frn; i++)
-        {
-            int tx = tiles[fr[i]].tx, tz = tiles[fr[i]].tz;
-            for (int dz = -1; dz <= 1; dz++)
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                if ((!dx && !dz) || tile_lookup(tx + dx, tz + dz) >= 0) continue;
-                int k = tile_new(tx + dx, tz + dz);
-                if (gn == gc) { gc = gc ? gc * 2 : 256; gen = realloc(gen, gc * sizeof(int)); }
-                gen[gn++] = k;
-            }
-        }
-        gen_batch(gen, gn);
-        for (size_t i = 0; i < frn; i++)
-        {
-            const int16_t *b = tiles[fr[i]].biome;
-            int tx = tiles[fr[i]].tx, tz = tiles[fr[i]].tz;
-            for (int dir = 0; dir < 4; dir++)
-            {
-                if (!edge_hit(b, dir, target)) continue;
-                int nb = tile_lookup(tx + dnx[dir], tz + dnz[dir]);
-                if (nb < 0 || tiles[nb].q) continue;
-                tiles[nb].q = 1;
-                if (nfn == nfc) { nfc = nfc ? nfc * 2 : 256; nf = realloc(nf, nfc * sizeof(int)); }
-                nf[nfn++] = nb;
-            }
-        }
-        free(fr); fr = nf; frn = nfn;
-        nf = NULL; nfc = 0;
-        if ((long long)ntiles * TAREA > MAX_CELLS) break;
-    }
-    free(fr); free(gen);
-    for (size_t i = 0; i < ntiles; i++) tiles[i].q = 0;
 }
 
 /* rivers generate where weirdness is within 0.05 of 0, this decides what would generate if the river didn't exist */
@@ -346,20 +288,25 @@ int main(int argc, char *argv[])
     if (target == grove) { b0 = snowy_taiga; b1 = taiga; }
     else if (target == snowy_slopes) { b0 = snowy_plains; b1 = ice_spikes; }
 
-    prefetch(s0, target);
-
     long long count = 0;
     int capped = 0;
     int dxu[4] = {0, 0, -1, 1}, dzu[4] = {-1, 1, 0, 0};
     tiles[s0].vis = calloc(TAREA, 1);
     tiles[s0].vis[(scz & TMASK) * TILE + (scx & TMASK)] = 1;
     spush(scx, scz);
-    while (sn)
+
+    while (sn || wn)
     {
+        if (!sn)
+        {
+            flush_pending();
+            for (size_t i = 0; i < wn; i++) spush(wtx[i], wtz[i]);
+            wn = 0;
+        }
         sn--;
         int x = stx[sn], z = stz[sn];
         int ti = tile_slot(x >> TBITS, z >> TBITS);
-        if (!tiles[ti].biome) flush_pending();
+        if (!tiles[ti].biome) { wpush(x, z); continue; }
         int bm = tiles[ti].biome[(z & TMASK) * TILE + (x & TMASK)];
         if (bm == target) { if (++count >= MAX_CELLS) { capped = 1; break; } }
         else if (!bridge || (bm != river && bm != frozen_river && bm != b0 && bm != b1) || under_river(&g, x, z) != target) continue;
