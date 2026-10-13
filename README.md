@@ -7,7 +7,7 @@ Also, because of this no border tolerance is needed leading to much more accurat
 
 ## Build
 
-Make sure to set `NUM_THREADS` in the defines before compiling.
+Make sure to set `THREADS` in the defines before compiling.
 
 MSYS2/MinGW on Windows, or Linux:
 
@@ -15,12 +15,26 @@ MSYS2/MinGW on Windows, or Linux:
 
 ## Usage
 
-    ./measure.exe <seed> <x> <z> [LB] [y]
+    ./measure.exe <seed> <x> <z> [LB] [y] [img]
 
-    Seed		World Seed
-    X Z		Coords of a point inside the biome you want measured
-    LB		Add this if measuring something in Large Biomes mode
-    Y		Y level to sample at, defaults to 256. Specify for cave biomes, e.g. 0 or -64
+    Seed		 World Seed
+    X Z		 Coords of a point inside the biome you want measured
+    LB		 Add this if measuring something in Large Biomes mode
+    Y		 Y level to sample at, defaults to 256. Specify for cave biomes, e.g. 0 or -64
+    img/img4/img16	 Flag to save images of the connected biome, see below (img4 or img16 to pick the scale)
+
+## Images
+
+With `img`, two PNGs of the same area are saved in the folder you run it from:
+
+- `<seed>_<Biome>_map.png`: The normal biome map, with the same window size as the biome only image.
+- `<seed>_<Biome>_only.png`: Only the measured biome on a black background. Bridged cells stay their own color so you can see where the biome connects.
+
+Scale for both is 1:4 (a pixel per 4 blocks) by default with a 256 block border on all sides. If that would be over 8192 pixels across (`IMG_MAX`) the scale changes to 1:16, or 1:64 if the image goes above 8192 pixels in 1:16 scale.
+
+Use the `img4` flag to generate the entire image in 1:4 scale no matter the size, and `img16` to only generate with 1:16 scale.
+
+LB and Y levels go in the file names (`_LB`, `_y-64`).
 
 ## Examples:
 
@@ -35,3 +49,7 @@ MSYS2/MinGW on Windows, or Linux:
 
      ./measure.exe -1757248279604625080 0 0 LB 0
      Biome: Dripstone Caves LB | Y=0 | 1:4 Size: 22039226 | Blocks^2 Size: 352627616
+
+     ./measure.exe 2147416166582 0 0 img
+     Biome: Badlands | 1:4 Size: 853707 | Blocks^2 Size: 13659312
+     Images: 2147416166582_Badlands_only.png, 2147416166582_Badlands_map.png (1:4, 3490x1406)

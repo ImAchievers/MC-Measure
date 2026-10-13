@@ -8,6 +8,9 @@
 
 #include "generator.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #define MC_VERSION MC_NEWEST
 #define THREADS 18
 #define TILE 64
@@ -15,6 +18,9 @@
 #define TMASK 63
 #define TAREA (TILE * TILE)
 #define MAX_CELLS 300000000LL
+#define IMG_MAX 8192
+#define IMG_PAD 64
+#define MAP_ROWS 64
 
 static const char *BIOME_NAMES[256] = {
     /* surface biomes, sampled at y=256 */
@@ -76,6 +82,66 @@ static const char *BIOME_NAMES[256] = {
     [lush_caves] = "Lush Caves",
     [deep_dark] = "Deep Dark",
     [sulfur_caves] = "Sulfur Caves",
+};
+
+/* default cubiomes viewer colors */
+static const uint32_t COLORS[256] = {
+    [ocean] = 0x000070,
+    [plains] = 0x8db360,
+    [desert] = 0xfa9418,
+    [windswept_hills] = 0x606060,
+    [forest] = 0x056621,
+    [taiga] = 0x0b6a5f,
+    [swamp] = 0x07f9b2,
+    [river] = 0x0000ff,
+    [frozen_ocean] = 0x7070d6,
+    [frozen_river] = 0xa0a0ff,
+    [snowy_plains] = 0xffffff,
+    [mushroom_fields] = 0xff00ff,
+    [beach] = 0xfade55,
+    [jungle] = 0x507b0a,
+    [sparse_jungle] = 0x60930f,
+    [deep_ocean] = 0x000030,
+    [stony_shore] = 0xa2a284,
+    [snowy_beach] = 0xfaf0c0,
+    [birch_forest] = 0x307444,
+    [dark_forest] = 0x40511a,
+    [snowy_taiga] = 0x31554a,
+    [old_growth_pine_taiga] = 0x596651,
+    [windswept_forest] = 0x5b7352,
+    [savanna] = 0xbdb25f,
+    [savanna_plateau] = 0xa79d64,
+    [badlands] = 0xd94515,
+    [wooded_badlands] = 0xb09765,
+    [warm_ocean] = 0x0000ac,
+    [lukewarm_ocean] = 0x000090,
+    [cold_ocean] = 0x202070,
+    [deep_lukewarm_ocean] = 0x000040,
+    [deep_cold_ocean] = 0x202038,
+    [deep_frozen_ocean] = 0x404090,
+    [sunflower_plains] = 0xb5db88,
+    [windswept_gravelly_hills] = 0x888888,
+    [flower_forest] = 0x2d8e49,
+    [ice_spikes] = 0xb4dcdc,
+    [old_growth_birch_forest] = 0x589c6c,
+    [old_growth_spruce_taiga] = 0x818e79,
+    [windswept_savanna] = 0xe5da87,
+    [eroded_badlands] = 0xff6d3d,
+    [bamboo_jungle] = 0x849500,
+    [meadow] = 0x60a445,
+    [grove] = 0x47726c,
+    [snowy_slopes] = 0xc4c4c4,
+    [jagged_peaks] = 0xdcdcc8,
+    [frozen_peaks] = 0xb0b3ce,
+    [stony_peaks] = 0x7b8f74,
+    [mangrove_swamp] = 0x2ccc8e,
+    [cherry_grove] = 0xff91c8,
+    [pale_garden] = 0x696d95,
+    [dappled_forest] = 0xdf6827,
+    [dripstone_caves] = 0x4e3012,
+    [lush_caves] = 0x283c00,
+    [deep_dark] = 0x031f29,
+    [sulfur_caves] = 0xc8d232,
 };
 
 /* biomes that bridge across rivers */
@@ -231,6 +297,87 @@ static int tile_slot(int tx, int tz)
     return idx;
 }
 
+static inline int fdiv(int a, int b){ return a >= 0 ? a / b : -((-a + b - 1) / b); }
+
+static void put(uint8_t *p, int id)
+{
+    uint32_t c = id >= 0 && id < 256 ? COLORS[id] : 0;
+    p[0] = c >> 16; p[1] = c >> 8; p[2] = c;
+}
+
+/* full biome map */
+static int16_t *g_ids;
+static int g_mx, g_mz, g_mw, g_mh, g_ms, g_my;
+static atomic_int g_row;
+
+static void *map_worker(void *a)
+{
+    (void)a;
+    Generator g;
+    setupGenerator(&g, MC_VERSION, g_lb ? LARGE_BIOMES : 0);
+    applySeed(&g, DIM_OVERWORLD, g_seed);
+    int *buf = malloc((size_t)g_mw * MAP_ROWS * sizeof(int));
+    int r0;
+    while ((r0 = atomic_fetch_add(&g_row, MAP_ROWS)) < g_mh)
+    {
+        int n = g_mh - r0 < MAP_ROWS ? g_mh - r0 : MAP_ROWS;
+        Range r = {g_ms, g_mx, g_mz + r0, g_mw, n, g_my, 1};
+        genBiomes(&g, buf, r);
+        for (size_t i = 0; i < (size_t)g_mw * n; i++) g_ids[(size_t)r0 * g_mw + i] = (int16_t)buf[i];
+    }
+    free(buf);
+    return NULL;
+}
+
+/* two images of the same area: connected cells only on a black background and the normal biomes */
+static void write_images(const char *base, int target, const int *gap, int f, int x0, int z0, int x1, int z1)
+{
+    x0 = fdiv(x0 - IMG_PAD, f); z0 = fdiv(z0 - IMG_PAD, f);
+    x1 = fdiv(x1 + IMG_PAD, f); z1 = fdiv(z1 + IMG_PAD, f);
+    int w = x1 - x0 + 1, h = z1 - z0 + 1;
+    size_t n = (size_t)w * h;
+    char path[256];
+
+    /* pixels with at least one counted or bridged cell in them */
+    uint8_t *in = calloc(n, 1);
+    for (size_t t = 0; t < ntiles; t++)
+    {
+        if (!tiles[t].vis) continue;
+        for (int i = 0; i < TAREA; i++)
+        {
+            if (tiles[t].vis[i] < 2) continue;
+            int px = fdiv((tiles[t].tx << TBITS) + (i & TMASK), f) - x0;
+            int pz = fdiv((tiles[t].tz << TBITS) + (i >> TBITS), f) - z0;
+            in[(size_t)pz * w + px] = 1;
+        }
+    }
+
+    g_ids = malloc(n * sizeof(int16_t));
+    g_mx = x0; g_mz = z0; g_mw = w; g_mh = h; g_ms = 4 * f; g_my = g_sy;
+    atomic_store(&g_row, 0);
+    pthread_t th[THREADS];
+    for (int t = 0; t < THREADS; t++) pthread_create(&th[t], NULL, map_worker, NULL);
+    for (int t = 0; t < THREADS; t++) pthread_join(th[t], NULL);
+
+    uint8_t *pix = malloc(n * 3);
+    for (size_t i = 0; i < n; i++) put(pix + i * 3, g_ids[i]);
+    snprintf(path, sizeof path, "%s_map.png", base);
+    stbi_write_png(path, w, h, 3, pix, w * 3);
+
+    /* biome and bridged rivers */
+    for (size_t i = 0; i < n; i++)
+    {
+        int id = g_ids[i];
+        if (in[i] && (id == target || id == gap[0] || id == gap[1] || id == gap[2] || id == gap[3])) put(pix + i * 3, id);
+        else memset(pix + i * 3, 0, 3);
+    }
+    snprintf(path, sizeof path, "%s_only.png", base);
+    stbi_write_png(path, w, h, 3, pix, w * 3);
+    free(in); free(g_ids); free(pix);
+
+    printf("Images: %s_only.png, %s_map.png (1:%d, %dx%d)\n", base, base, 4 * f, w, h);
+}
+
 /* rivers generate where weirdness is within 0.05 of 0, this decides what would generate if the river didn't exist */
 static int under_river(Generator *g, int x, int z)
 {
@@ -245,16 +392,19 @@ int main(int argc, char *argv[])
 {
     if (argc < 4)
     {
-        fprintf(stderr, "usage: %s <seed> <x> <z> [LB] [y]\n", argv[0]);
+        fprintf(stderr, "usage: %s <seed> <x> <z> [LB] [y] [img|img4|img16]\n", argv[0]);
         return 1;
     }
     uint64_t seed = (uint64_t)strtoll(argv[1], NULL, 10);
     int bx = atoi(argv[2]);
     int bz = atoi(argv[3]);
-    int lb = 0, yset = 0, by = 256;
+    int lb = 0, yset = 0, by = 256, img = 0;
     for (int i = 4; i < argc; i++)
     {
         if (!strcmp(argv[i], "LB") || !strcmp(argv[i], "lb")) lb = 1;
+        else if (!strcmp(argv[i], "img")) img = 1;
+        else if (!strcmp(argv[i], "img4")) img = 4;
+        else if (!strcmp(argv[i], "img16")) img = 16;
         else { by = atoi(argv[i]); yset = 1; }
     }
 
@@ -289,7 +439,7 @@ int main(int argc, char *argv[])
     else if (target == snowy_slopes) { b0 = snowy_plains; b1 = ice_spikes; }
 
     long long count = 0;
-    int capped = 0;
+    int capped = 0, x0 = scx, z0 = scz, x1 = scx, z1 = scz;
     int dxu[4] = {0, 0, -1, 1}, dzu[4] = {-1, 1, 0, 0};
     tiles[s0].vis = calloc(TAREA, 1);
     tiles[s0].vis[(scz & TMASK) * TILE + (scx & TMASK)] = 1;
@@ -310,6 +460,11 @@ int main(int argc, char *argv[])
         int bm = tiles[ti].biome[(z & TMASK) * TILE + (x & TMASK)];
         if (bm == target) { if (++count >= MAX_CELLS) { capped = 1; break; } }
         else if (!bridge || (bm != river && bm != frozen_river && bm != b0 && bm != b1) || under_river(&g, x, z) != target) continue;
+        tiles[ti].vis[(z & TMASK) * TILE + (x & TMASK)] = 2;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (z < z0) z0 = z;
+        if (z > z1) z1 = z;
         for (int i = 0; i < 4; i++)
         {
             int nx = x + dxu[i], nz = z + dzu[i];
@@ -337,5 +492,19 @@ int main(int argc, char *argv[])
         printf("Biome: %s%s | %s1:4 Size: %lld | Blocks^2 Size: %lld\n", nm, lb ? " LB" : "", ys, count, count * 16);
     else
         printf("Biome: id %d%s | %s1:4 Size: %lld | Blocks^2 Size: %lld\n", target, lb ? " LB" : "", ys, count, count * 16);
+
+    if (img)
+    {
+        int f = img == 16 ? 4 : 1, span = x1 - x0 > z1 - z0 ? x1 - x0 : z1 - z0;
+        if (img == 1) while ((span + 2 * IMG_PAD) / f > IMG_MAX && f < 16) f *= 4;
+        char base[160], nb[64];
+        if (nm) { snprintf(nb, sizeof nb, "%s", nm); for (char *c = nb; *c; c++) if (*c == ' ') *c = '_'; }
+        else snprintf(nb, sizeof nb, "id%d", target);
+        int n = snprintf(base, sizeof base, "%lld_%s%s", (long long)seed, nb, lb ? "_LB" : "");
+        if (yset) snprintf(base + n, sizeof base - n, "_y%d", by);
+        int gap[4] = {-1, -1, -1, -1};
+        if (bridge) { gap[0] = river; gap[1] = frozen_river; gap[2] = b0; gap[3] = b1; }
+        write_images(base, target, gap, f, x0, z0, x1, z1);
+    }
     return 0;
 }

@@ -16,3 +16,6 @@ measure
 Thumbs.db
 .vscode/
 .idea/
+
+# Images from img
+*.png
