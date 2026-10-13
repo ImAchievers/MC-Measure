@@ -297,7 +297,7 @@ static int tile_slot(int tx, int tz)
     return idx;
 }
 
-static inline int fdiv(int a, int b){ return a >= 0 ? a / b : -((-a + b - 1) / b); }
+static inline int floor_div(int a, int b){ return a >= 0 ? a / b : -((-a + b - 1) / b); }
 
 static void put(uint8_t *p, int id)
 {
@@ -332,8 +332,8 @@ static void *map_worker(void *a)
 /* two images of the same area: connected cells only on a black background and the normal biomes */
 static void write_images(const char *base, int target, const int *gap, int f, int x0, int z0, int x1, int z1)
 {
-    x0 = fdiv(x0 - IMG_PAD, f); z0 = fdiv(z0 - IMG_PAD, f);
-    x1 = fdiv(x1 + IMG_PAD, f); z1 = fdiv(z1 + IMG_PAD, f);
+    x0 = floor_div(x0 - IMG_PAD, f); z0 = floor_div(z0 - IMG_PAD, f);
+    x1 = floor_div(x1 + IMG_PAD, f); z1 = floor_div(z1 + IMG_PAD, f);
     int w = x1 - x0 + 1, h = z1 - z0 + 1;
     size_t n = (size_t)w * h;
     char path[256];
@@ -346,8 +346,8 @@ static void write_images(const char *base, int target, const int *gap, int f, in
         for (int i = 0; i < TAREA; i++)
         {
             if (tiles[t].vis[i] < 2) continue;
-            int px = fdiv((tiles[t].tx << TBITS) + (i & TMASK), f) - x0;
-            int pz = fdiv((tiles[t].tz << TBITS) + (i >> TBITS), f) - z0;
+            int px = floor_div((tiles[t].tx << TBITS) + (i & TMASK), f) - x0;
+            int pz = floor_div((tiles[t].tz << TBITS) + (i >> TBITS), f) - z0;
             in[(size_t)pz * w + px] = 1;
         }
     }
