@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 
 #include "generator.h"
+#include "tables/btree263.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -215,14 +216,98 @@ static int tile_new(int tx, int tz)
 static uint64_t g_seed;
 static int g_lb, g_sy;
 
+/* the biome tree as a lookup table, based on the JUNO Project genlut.c by bryce219 */
+static const int LUT_AXIS[5] = {0, 1, 2, 3, 5};
+static int32_t g_cut[5][64];
+static int g_ncut[5];
+static long g_cells;
+static uint8_t *g_lut;
+static atomic_long g_lutnext;
+
+static int cmp_int(const void *a, const void *b)
+{
+    int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
+    return (x > y) - (x < y);
+}
+
+static void *lut_worker(void *arg)
+{
+    (void)arg;
+    long i;
+    while ((i = atomic_fetch_add(&g_lutnext, 4096)) < g_cells)
+    {
+        long end = i + 4096 < g_cells ? i + 4096 : g_cells;
+        for (; i < end; i++)
+        {
+            uint64_t np[6];
+            long r = i;
+            for (int a = 4; a >= 0; a--)
+            {
+                int c = (int)(r % (g_ncut[a] + 1));
+                r /= g_ncut[a] + 1;
+                np[LUT_AXIS[a]] = (uint64_t)(int64_t)(c ? g_cut[a][c - 1] : g_cut[a][0] - 1);
+            }
+            np[4] = (uint64_t)(int64_t)-15000;
+            g_lut[i] = (uint8_t)climateToBiome(MC_VERSION, np, NULL);
+        }
+    }
+    return NULL;
+}
+
+static void build_lut(void)
+{
+    int n = sizeof(btree263_nodes) / sizeof(uint64_t);
+    int32_t *e = malloc(2 * n * sizeof(int32_t));
+    g_cells = 1;
+    for (int a = 0; a < 5; a++)
+    {
+        int m = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if ((btree263_nodes[i] >> 48) < (uint64_t)n) continue;
+            int p = (btree263_nodes[i] >> (8 * LUT_AXIS[a])) & 0xff;
+            e[m++] = btree263_param[p][0];
+            e[m++] = btree263_param[p][1] + 1;
+        }
+        qsort(e, m, sizeof(int32_t), cmp_int);
+        g_ncut[a] = 0;
+        for (int i = 0; i < m; i++)
+            if (!i || e[i] != e[i - 1]) g_cut[a][g_ncut[a]++] = e[i];
+        g_cells *= g_ncut[a] + 1;
+    }
+    free(e);
+    g_lut = malloc(g_cells);
+    atomic_store(&g_lutnext, 0);
+    pthread_t th[THREADS];
+    for (int t = 0; t < THREADS; t++) pthread_create(&th[t], NULL, lut_worker, NULL);
+    for (int t = 0; t < THREADS; t++) pthread_join(th[t], NULL);
+}
+
+static int lut_biome(int mc, int64_t *np)
+{
+    if (np[4] > 0 || mc != MC_26_3) return climateToBiome(mc, (const uint64_t *)np, NULL);
+    long i = 0;
+    for (int a = 0; a < 5; a++)
+    {
+        int64_t v = np[LUT_AXIS[a]];
+        int c = 0;
+        while (c < g_ncut[a] && v >= g_cut[a][c]) c++;
+        if (c == 0 || c == g_ncut[a]) return climateToBiome(mc, (const uint64_t *)np, NULL);
+        i = i * (g_ncut[a] + 1) + c;
+    }
+    return g_lut[i];
+}
+
 static void gen_tile(Generator *g, Tile *t)
 {
-    int *buf = malloc(TAREA * sizeof(int));
-    Range r = {4, t->tx << TBITS, t->tz << TBITS, TILE, TILE, g_sy, 1};
-    genBiomes(g, buf, r);
     int16_t *b = malloc(TAREA * sizeof(int16_t));
-    for (int i = 0; i < TAREA; i++) b[i] = (int16_t)buf[i];
-    free(buf);
+    int64_t np[6];
+    for (int i = 0; i < TAREA; i++)
+    {
+        int x = (t->tx << TBITS) + (i & TMASK), z = (t->tz << TBITS) + (i >> TBITS);
+        sampleBiomeNoise(&g->bn, np, x, g_sy, z, NULL, SAMPLE_NO_BIOME);
+        b[i] = (int16_t)lut_biome(g->mc, np);
+    }
     t->biome = b;
 }
 
@@ -385,7 +470,7 @@ static int under_river(Generator *g, int x, int z)
     sampleBiomeNoise(&g->bn, np, x, g_sy, z, NULL, SAMPLE_NO_BIOME);
     if (np[5] > 500 || np[5] < -500) return -1;
     np[5] = np[5] >= 0 ? 501 : -501;
-    return climateToBiome(g->mc, (const uint64_t *)np, NULL);
+    return lut_biome(g->mc, np);
 }
 
 int main(int argc, char *argv[])
@@ -410,6 +495,7 @@ int main(int argc, char *argv[])
 
     g_seed = seed; g_lb = lb; g_sy = by >> 2;
     int scx = bx >> 2, scz = bz >> 2;
+    build_lut();
 
     Generator g;
     setupGenerator(&g, MC_VERSION, lb ? LARGE_BIOMES : 0);
