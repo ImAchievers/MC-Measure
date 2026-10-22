@@ -19,3 +19,7 @@ Thumbs.db
 
 # Images from img
 *.png
+images/
+
+# Results
+measure_results.txt
