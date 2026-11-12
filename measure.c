@@ -25,6 +25,7 @@
 #define MC_VERSION MC_NEWEST
 #define THREADS 18
 #define BG_COLOR 0x000000
+#define SIDE_TEXT VERTICAL
 #define TILE 64
 #define TBITS 6
 #define TMASK 63
@@ -431,6 +432,22 @@ static void draw_text(Img *im, int x, int y, int sc, const char *s, const uint8_
     }
 }
 
+/* the same characters turned for the side label */
+static void draw_text_up(Img *im, int x, int y, int sc, const char *s, const uint8_t *col)
+{
+    y += text_width(s, sc);
+    for (; *s; s++)
+    {
+        if (*s < 32 || *s >= 127) continue;
+        const uint8_t *gl = FONT[*s - 32];
+        for (int r = 0; r < 8; r++)
+            for (int c = 0; c < 5; c++)
+                if (gl[r] >> c & 1) fill_rect(im, x + r * sc, y - (c + 1) * sc, sc, sc, col);
+        y -= 6 * sc;
+    }
+}
+
+/* 31407 -> 31,407 */
 static void commas(char *buf, long long v)
 {
     char t[32];
@@ -479,29 +496,33 @@ static void gen_map(int x0, int z0, int w, int h, int f)
 
 static const uint8_t BG[3] = { BG_COLOR >> 16 & 255, BG_COLOR >> 8 & 255, BG_COLOR & 255 };
 
-/* the width and height brackets just outside the map, same for both images so they line up */
+enum { HORIZONTAL, VERTICAL };
+
+/* the width and height brackets just outside the map, the same on both images so they line up */
 typedef struct
 {
-    int sc, m, gap, tick, lw, th, ww, hw;
+    int sc, m, gap, tick, lw, th, ww, hw, vl;
     int px0, pz0, px1, pz1, vx, hy, vin, hin, vlx, vly, hlx, hly;
     int minx, minz, maxx, maxz;
     char wl[48], hl[48];
 } Marks;
 
-static void place(Marks *k, int w, int h)
+static void place(Marks *k, int w, int h, const char **lines)
 {
     int big = w > h ? w : h, sc = (big + 240) / 480;
     if (sc < 1) sc = 1;
     k->sc = sc; k->m = 6 * sc; k->gap = 4 * sc; k->tick = 3 * sc; k->lw = sc / 2 < 1 ? 1 : sc / 2; k->th = 7 * sc;
     k->ww = text_width(k->wl, sc); k->hw = text_width(k->hl, sc);
 
-    /* the side label goes to the left of the bracket and the bottom one in its bracket if it fits or underneath if not */
+    /* each label goes in a gap in its bracket, or outside it if it doesn't fit */
     k->vx = -10 * sc - k->lw;
     k->hy = h + 10 * sc + k->th / 2;
-    k->vin = k->th + 2 * k->gap < k->pz1 - k->pz0;
+    k->vl = SIDE_TEXT == VERTICAL ? k->hw : k->th;
+    k->vin = k->vl + 2 * k->gap < k->pz1 - k->pz0;
     k->hin = k->ww + 2 * k->gap < k->px1 - k->px0;
-    k->vlx = k->vx - k->gap - k->hw;
-    k->vly = (k->pz0 + k->pz1) / 2 - k->th / 2;
+    if (SIDE_TEXT != VERTICAL) k->vlx = k->vx - k->gap - k->hw;
+    else k->vlx = k->vin ? k->vx + k->lw / 2 - k->th / 2 : k->vx - k->gap - k->th;
+    k->vly = (k->pz0 + k->pz1) / 2 - k->vl / 2;
     k->hlx = (k->px0 + k->px1) / 2 - k->ww / 2;
     k->hly = k->hin ? k->hy - k->th / 2 : k->hy + k->gap;
 
@@ -510,12 +531,18 @@ static void place(Marks *k, int w, int h)
     k->minz = -(17 * sc + 2 * k->m);
     k->maxx = w + k->m;
     if (k->hlx + k->ww + k->m > k->maxx) k->maxx = k->hlx + k->ww + k->m;
+
+    /* seed and coords top left, sizes top right */
+    int left = text_width(lines[0], sc), right = text_width(lines[2], sc);
+    if (text_width(lines[1], sc) > left) left = text_width(lines[1], sc);
+    if (text_width(lines[3], sc) > right) right = text_width(lines[3], sc);
+    if (k->vx + left + 3 * k->m + right > k->maxx) k->maxx = k->vx + left + 3 * k->m + right;
     k->maxz = k->hly + k->th + k->m;
 }
 
-static Img annotate(Img src, const Marks *k, const char *l1, const char *l2)
+static Img annotate(Img src, const Marks *k, const char **lines)
 {
-    const uint8_t light[3] = {200, 204, 212}, dark[3] = {48, 50, 56};
+    const uint8_t light[3] = {200, 204, 212}, dark[3] = {48, 50, 56}, dim[3] = {125, 129, 138};
     const uint8_t *col = BG[0] + BG[1] + BG[2] > 384 ? dark : light;
     Img im = { NULL, k->maxx - k->minx, k->maxz - k->minz };
     im.p = malloc((size_t)im.w * im.h * 3);
@@ -523,13 +550,13 @@ static Img annotate(Img src, const Marks *k, const char *l1, const char *l2)
     int ox = -k->minx, oz = -k->minz;
     for (int j = 0; j < src.h; j++) memcpy(im.p + ((size_t)(j + oz) * im.w + ox) * 3, src.p + (size_t)j * src.w * 3, (size_t)src.w * 3);
 
-    int sc = k->sc, gap = k->gap, lw = k->lw, th = k->th, tick = k->tick, ww = k->ww;
+    int sc = k->sc, gap = k->gap, lw = k->lw, tick = k->tick, ww = k->ww, vl = k->vl;
     int vx = k->vx + ox, vly = k->vly + oz, hy = k->hy + oz, hlx = k->hlx + ox;
     int vz0 = k->pz0 + oz, vz1 = k->pz1 + 1 + oz, hx0 = k->px0 + ox, hx1 = k->px1 + 1 + ox;
     if (k->vin)
     {
         fill_rect(&im, vx, vz0, lw, vly - gap - vz0, col);
-        fill_rect(&im, vx, vly + th + gap, lw, vz1 - vly - th - gap, col);
+        fill_rect(&im, vx, vly + vl + gap, lw, vz1 - vly - vl - gap, col);
     }
     else fill_rect(&im, vx, vz0, lw, vz1 - vz0, col);
     fill_rect(&im, vx, vz0, tick, lw, col);
@@ -542,15 +569,17 @@ static Img annotate(Img src, const Marks *k, const char *l1, const char *l2)
     else fill_rect(&im, hx0, hy, hx1 - hx0, lw, col);
     fill_rect(&im, hx0, hy - tick + lw, lw, tick, col);
     fill_rect(&im, hx1 - lw, hy - tick + lw, lw, tick, col);
-    draw_text(&im, k->vlx + ox, vly, sc, k->hl, col);
+    if (SIDE_TEXT == VERTICAL) draw_text_up(&im, k->vlx + ox, vly, sc, k->hl, col);
+    else draw_text(&im, k->vlx + ox, vly, sc, k->hl, col);
     draw_text(&im, hlx, k->hly + oz, sc, k->wl, col);
-    draw_text(&im, k->m, k->m, sc, l1, col);
-    draw_text(&im, k->m, k->m + 10 * sc, sc, l2, col);
+    draw_text(&im, vx, k->m, sc, lines[0], col);
+    draw_text(&im, vx, k->m + 10 * sc, sc, lines[1], dim);
+    for (int i = 2; i < 4; i++) draw_text(&im, im.w - k->m - text_width(lines[i], sc), k->m + 10 * sc * (i - 2), sc, lines[i], col);
     return im;
 }
 
-/* the normal biome map and the biome only map, on the same canvas so they line up */
-static void write_images(const char *base, const char *l1, const char *l2, int target, const int *gap, int f, int x0, int z0, int x1, int z1)
+/* the normal biome map and the biome on its own, on the same canvas so they line up */
+static void write_images(const char *base, const char **lines, int target, const int *gap, int f, int x0, int z0, int x1, int z1)
 {
     Marks k;
     char num[32];
@@ -588,12 +617,12 @@ static void write_images(const char *base, const char *l1, const char *l2, int t
     }
 
     Img ms = { map, w, h }, os = { only, w, h };
-    place(&k, w, h);
-    Img im = annotate(ms, &k, l1, l2);
+    place(&k, w, h, lines);
+    Img im = annotate(ms, &k, lines);
     snprintf(path, sizeof path, IMG_DIR "/%s_map.png", base);
     stbi_write_png(path, im.w, im.h, 3, im.p, im.w * 3);
     free(im.p);
-    im = annotate(os, &k, l1, l2);
+    im = annotate(os, &k, lines);
     snprintf(path, sizeof path, IMG_DIR "/%s_only.png", base);
     stbi_write_png(path, im.w, im.h, 3, im.p, im.w * 3);
     free(im.p); free(in); free(g_ids); free(map); free(only);
@@ -601,7 +630,7 @@ static void write_images(const char *base, const char *l1, const char *l2, int t
     printf("Images: " IMG_DIR "/%s_only.png, " IMG_DIR "/%s_map.png (1:%d, %dx%d)\n", base, base, 4 * f, im.w, im.h);
 }
 
-/* the biome map centered on the coords with a ring or box drawn */
+/* the biome map centered on the coords with a ring (radius r) or box (side r) over it, both in blocks */
 static void write_ring(const char *base, int box, int r, int bx, int bz, int img)
 {
     int rc = (box ? r / 2 : r) / 4 + 1, cx = floor_div(bx, 4), cz = floor_div(bz, 4);
@@ -665,6 +694,7 @@ static void usage(const char *exe)
     fprintf(stderr, "       %s list <file>\n", exe);
 }
 
+/* one measurement from the arguments after the exe name, returns 0 if it worked */
 static int measure(int argc, char **argv, const char *exe)
 {
     if (argc < 1 || !is_num(argv[0])) { usage(exe); return 1; }
@@ -790,11 +820,14 @@ static int measure(int argc, char **argv, const char *exe)
             if (img == 1) while ((span + 2 * IMG_PAD) / f > IMG_MAX && f < 16) f *= 4;
             int gap[4] = {-1, -1, -1, -1};
             if (bridge) { gap[0] = river; gap[1] = frozen_river; gap[2] = b0; gap[3] = b1; }
-            char l1[64], l2[64];
-            n = snprintf(l1, sizeof l1, "%lld%s", (long long)seed, lb ? " [LB]" : "");
-            if (yset) snprintf(l1 + n, sizeof l1 - n, " [Y=%d]", by);
-            snprintf(l2, sizeof l2, "%d %d", bx, bz);
-            write_images(base, l1, l2, target, gap, f, x0, z0, x1, z1);
+            char l1[32], l2[64], l3[64], l4[64], num[32];
+            snprintf(l1, sizeof l1, "%lld", (long long)seed);
+            n = snprintf(l2, sizeof l2, "%d %d%s", bx, bz, lb ? " [LB]" : "");
+            if (yset) snprintf(l2 + n, sizeof l2 - n, " [Y=%d]", by);
+            commas(num, count); snprintf(l3, sizeof l3, "1:4 Size: %s", num);
+            commas(num, count * 16); snprintf(l4, sizeof l4, "Blocks^2 Size: %s", num);
+            const char *lines[4] = { l1, l2, l3, l4 };
+            write_images(base, lines, target, gap, f, x0, z0, x1, z1);
         }
         if (ring) write_ring(base, 0, ring, bx, bz, img);
         if (box) write_ring(base, 1, box, bx, bz, img);

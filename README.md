@@ -11,6 +11,7 @@ Settings to adjust in the #defines before compiling:
 
     THREADS     Worker threads, adjust for your PC
     BG_COLOR    Background color of the images, 0x000000 for black (default), 0xFFFFFF for white, or any other hex code you'd like
+    SIDE_TEXT   VERTICAL (default), turns the height label to read upward inside its bracket, HORIZONTAL keeps it flat
 
 MSYS2/MinGW on Windows, or Linux:
 
@@ -40,7 +41,7 @@ With `img`, two PNGs of the same area are saved in an `images` folder where you 
 - `<seed>_<Biome>_map.png`: The normal biome map of the same area, framed by the background color.
 - `<seed>_<Biome>_only.png`: Only the measured biome on the background color (black by default). Bridged cells stay their own color so you can see where the biome connects.
 
-Both have the seed and coords in the top left and the biome's width and height in blocks along the left and bottom. The labels use the [Monocraft](https://github.com/IdreesInc/Monocraft) font (lib/font.h, OFL license in lib/OFL.txt).
+Both have the seed and coords in the top left, the size in the top right, and the biome's width and height in blocks along the left and bottom. The labels use the [Monocraft](https://github.com/IdreesInc/Monocraft) font (lib/font.h, OFL license in lib/OFL.txt).
 
 Scale for both is 1:4 (a pixel per 4 blocks) by default with a 256 block border on all sides. If that would be over 8192 pixels across (`IMG_MAX`) the scale changes to 1:16, or 1:64 if the image goes above 8192 pixels in 1:16 scale.
 
@@ -78,7 +79,7 @@ Lines that don't start with a seed are skipped.
 
      ./measure.exe 2147416166582 0 0 img
      Biome: Badlands | 1:4 Size: 853707 | Blocks^2 Size: 13659312
-     Images: images/2147416166582_Badlands_only.png, images/2147416166582_Badlands_map.png (1:4, 4172x1770)
+     Images: images/2147416166582_Badlands_only.png, images/2147416166582_Badlands_map.png (1:4, 3670x1770)
 
      ./measure.exe 3437289040000199328 ring 2332
      Biome: River | 1:4 Size: 562 | Blocks^2 Size: 8992
